@@ -54,7 +54,7 @@ pub trait ILottery<TContractState> {
     //=======================================================================================
     //set functions
     fn Initialize(ref self: TContractState, ticketPrice: u256, accumulatedPrize: u256);
-    fn BuyTicket(ref self: TContractState, drawId: u64, numbers: Array<u16>);
+    fn BuyTicket(ref self: TContractState, drawId: u64, numbers: Array<u16>, quantity: u8);
     fn DrawNumbers(ref self: TContractState, drawId: u64);
     fn ClaimPrize(ref self: TContractState, drawId: u64, ticketId: felt252);
     fn CheckMatches(
@@ -256,7 +256,7 @@ pub mod Lottery {
 
         //=======================================================================================
         //OK
-        fn BuyTicket(ref self: ContractState, drawId: u64, numbers: Array<u16>) {
+        fn BuyTicket(ref self: ContractState, drawId: u64, numbers: Array<u16>, quantity: u8) {
             // Reentrancy guard at the very beginning
             assert(!self.reentrancy_guard.read(), 'ReentrancyGuard: reentrant call');
             self.reentrancy_guard.write(true);
@@ -264,6 +264,10 @@ pub mod Lottery {
             // Input validation
             assert(self.ValidateNumbers(@numbers), 'Invalid numbers');
             assert(numbers.len() == 5, 'Invalid numbers length');
+            
+            // Validate quantity limits (1-10 tickets)
+            assert(quantity >= 1, 'Quantity too low');
+            assert(quantity <= 10, 'Quantity too high');
 
             let draw = self.draws.entry(drawId).read();
             assert(draw.isActive, 'Draw is not active');
@@ -278,71 +282,85 @@ pub mod Lottery {
             // --- Balance validation and deduction logic ---
             // 1. Get ticket price and user/vault addresses
             let ticket_price = self.ticketPrice.read();
+            let total_cost = ticket_price * quantity.into();
             let user = get_caller_address();
             let vault_address: ContractAddress = STRK_PLAY_VAULT_CONTRACT_ADDRESS
                 .try_into()
                 .unwrap();
 
-            // 2. Validate user has sufficient token balance
+            // 2. Validate user has sufficient token balance for total quantity
             let user_balance = token_dispatcher.balance_of(user);
             assert(user_balance > 0, 'No token balance');
-            assert(user_balance >= ticket_price, 'Insufficient balance');
+            assert(user_balance >= total_cost, 'Insufficient balance');
 
-            // 3. Validate user has approved lottery contract for token transfer
+            // 3. Validate user has approved lottery contract for total token transfer
             let allowance = token_dispatcher.allowance(user, get_contract_address());
-            assert(allowance >= ticket_price, 'Insufficient allowance');
+            assert(allowance >= total_cost, 'Insufficient allowance');
 
-            // 4. Execute token transfer from user to vault
+            // 4. Execute token transfer from user to vault for total cost
             let transfer_success = token_dispatcher
-                .transfer_from(user, vault_address, ticket_price);
+                .transfer_from(user, vault_address, total_cost);
             assert(transfer_success, 'Transfer failed');
             // --- End balance validation and deduction logic ---
 
-            // TODO: Mint the NFT here, for now it is simulated
-            let minted = true;
-            assert(minted, 'NFT minting failed');
-
-            // Debug del array antes de crear el ticket
+            // Extract numbers for ticket creation
             let n1 = *numbers.at(0);
             let n2 = *numbers.at(1);
             let n3 = *numbers.at(2);
             let n4 = *numbers.at(3);
             let n5 = *numbers.at(4);
 
-            let ticketNew = Ticket {
-                player: get_caller_address(),
-                number1: n1,
-                number2: n2,
-                number3: n3,
-                number4: n4,
-                number5: n5,
-                claimed: false,
-                drawId: drawId,
-                timestamp: current_timestamp,
-            };
-
-            let ticketId = GenerateTicketId(ref self);
-            self.tickets.entry((drawId, ticketId)).write(ticketNew);
-
-            //Incrementar contador y guardar ticketId
-
             let caller = get_caller_address();
             let mut count = self.userTicketCount.entry((caller, drawId)).read();
-            count += 1;
-            self.userTicketCount.entry((caller, drawId)).write(count);
-            self.userTicketIds.entry((caller, drawId, count)).write(ticketId);
 
-            self
-                .emit(
+            // Generate multiple tickets in a loop
+            let mut i: u8 = 0;
+            while i < quantity {
+                // TODO: Mint the NFT here, for now it is simulated
+                let minted = true;
+                assert(minted, 'NFT minting failed');
+
+                let ticketNew = Ticket {
+                    player: caller,
+                    number1: n1,
+                    number2: n2,
+                    number3: n3,
+                    number4: n4,
+                    number5: n5,
+                    claimed: false,
+                    drawId: drawId,
+                    timestamp: current_timestamp,
+                };
+
+                let ticketId = GenerateTicketId(ref self);
+                self.tickets.entry((drawId, ticketId)).write(ticketNew);
+
+                // Increment counter and save ticketId
+                count += 1;
+                self.userTicketCount.entry((caller, drawId)).write(count);
+                self.userTicketIds.entry((caller, drawId, count)).write(ticketId);
+
+                // Emit event for each generated ticket
+                let mut event_numbers = ArrayTrait::new();
+                event_numbers.append(n1);
+                event_numbers.append(n2);
+                event_numbers.append(n3);
+                event_numbers.append(n4);
+                event_numbers.append(n5);
+                
+                self.emit(
                     TicketPurchased {
                         drawId,
                         player: caller,
                         ticketId,
-                        numbers,
+                        numbers: event_numbers,
                         ticketCount: count,
                         timestamp: current_timestamp,
                     },
                 );
+
+                i += 1;
+            }
 
             // Release reentrancy guard
             self.reentrancy_guard.write(false);
